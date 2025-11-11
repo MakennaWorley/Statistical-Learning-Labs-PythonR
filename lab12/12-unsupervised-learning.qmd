@@ -1,0 +1,660 @@
+# Unsupervised Learning
+
+```{r}
+#| echo: false
+set.seed(1234)
+#source("_common.R")
+knitr::opts_chunk$set(error = TRUE)
+```
+
+This final chapter talks about unsupervised learning. This is broken into two parts. Dimensionality reduction and clustering. Dimensionality reduction will be handled mostly as a preprocessor which is done with [recipes](https://recipes.tidymodels.org/) package, and clustering is done with the [tidyclust](https://github.com/emilhvitfeldt/tidyclust) package.
+
+```{r}
+#| message: false
+library(tidymodels)
+library(tidyclust)
+library(factoextra)
+library(patchwork)
+library(proxy)
+library(ISLR)
+```
+
+## Principal Components Analysis
+
+This section will be used to explore the `USArrests` data set using PCA. Before we move on, let is turn `USArrests` into a tibble and move the rownames into a column.
+
+```{r}
+USArrests <- as_tibble(USArrests, rownames = "state")
+USArrests
+```
+
+Notice how the mean of each of the variables is quite different. if we were to apply PCA directly to the data set then `Murder` would have a very small influence.
+
+```{r}
+USArrests %>%
+  select(-state) %>%
+  map_dfr(mean)
+```
+
+We will show how to perform PCA in two different ways in this section. Firstly, by using `prcomp()` directly, using `broom::tidy()` to extract the information we need, and secondly by using recipes.
+`prcomp()` takes 1 required argument `x` which much be a fully numeric data.frame or matrix. Then we pass that to `prcomp()`. We also set `scale = TRUE` in `prcomp()` which will perform the scaling we need.
+
+```{r}
+USArrests_pca <- USArrests %>%
+  select(-state) %>%
+  prcomp(scale = TRUE)
+
+USArrests_pca
+```
+
+Now we can use our favorite broom function to extract information from this `prcomp` object. 
+We start with `tidy()`. `tidy()` can be used to extract a couple of different things, see `?broom:::tidy.prcomp()` for more information. `tidy()` will by default extract the scores of a PCA object in long tidy format. The score is the location of the observation in PCA space. So we can 
+
+```{r}
+tidy(USArrests_pca)
+```
+
+We can also explicitly say we want the scores by setting `matrix = "scores"`.
+
+```{r}
+tidy(USArrests_pca, matrix = "scores")
+```
+
+Next, we can get the loadings of the PCA.
+
+```{r}
+tidy(USArrests_pca, matrix = "loadings")
+```
+
+This information tells us how each variable contributes to each principal component. If you don't have too many principal components you can visualize the contribution without filtering
+
+```{r}
+#| fig-alt: |
+#|   Facetted barchart of the principal component loadings.
+#|   The 4 variables are shown across the y-axis and the amount
+#|   of the loading is show as the bar height across the x-axis.
+#|   The 4 variables: UnbanPop, Rape, Murder and Assault are more
+#|   or less evenly represented in the first loading, with 
+#|   UnbanPop least. Second loading has UnbanPop highest, third
+#|   loading has Rape highest. Murder and Assult highest in forth
+#|   and final loading.
+tidy(USArrests_pca, matrix = "loadings") %>%
+  ggplot(aes(value, column)) +
+  facet_wrap(~ PC) +
+  geom_col() +
+  scale_x_continuous(labels = scales::percent)
+```
+
+Lastly, we can set `matrix = "eigenvalues"` and get back the explained standard deviation for each PC including as a percent and cumulative which is quite handy for plotting.
+
+```{r}
+tidy(USArrests_pca, matrix = "eigenvalues")
+```
+
+If we want to see how the percent standard deviation explained drops off for each PC we can easily get that by using `tidy()` with `matrix = "eigenvalues"`.
+
+```{r}
+#| fig-alt: |
+#|   Bar chart of percent standard deviation explained for the
+#|   4 principal components. First PC is a little over 60%, second
+#|   is at around 25%, third is a little under 10% and forth is at
+#|   around 5%.
+tidy(USArrests_pca, matrix = "eigenvalues") %>%
+  ggplot(aes(PC, percent)) +
+  geom_col()
+```
+
+Lastly, we have the `augment()` function which will give you back the fitted PC transformation if you apply it to the `prcomp()` object directly
+
+```{r}
+augment(USArrests_pca)
+```
+
+and will apply this transformation to new data by passing the new data to `newdata`
+
+```{r}
+augment(USArrests_pca, newdata = USArrests[1:5, ])
+```
+
+If you are using PCA as a preprocessing method I recommend you use recipes to apply the PCA transformation. This is a good way of doing it since recipe will correctly apply the same transformation to new data that the recipe is used on.
+
+We `step_normalize()` to make sure all the variables are on the same scale. By using `all_numeric()` we are able to apply PCA on the variables we want without having to remove `state`. We are also setting an `id` for `step_pca()` to make it easier to `tidy()` later.
+
+```{r}
+pca_rec <- recipe(~., data = USArrests) %>%
+  step_normalize(all_numeric()) %>%
+  step_pca(all_numeric(), id = "pca") %>%
+  prep()
+```
+
+By calling `bake(new_data = NULL)` we can get the fitted PC transformation of our numerical variables
+
+```{r}
+pca_rec %>%
+  bake(new_data = NULL)
+```
+
+but we can also supply our own data to `new_data`.
+
+```{r}
+pca_rec %>%
+  bake(new_data = USArrests[40:45, ])
+```
+
+We can get back the same information as we could for `prcomp()` but we have to specify the slightly different inside `tidy()`. Here `id = "pca"` refers to the second step of `pca_rec`. We get the `scores` with `type = "coef"`.
+
+```{r}
+tidy(pca_rec, id = "pca", type = "coef")
+```
+
+And the eigenvalues with `type = "variance"`.
+
+```{r}
+tidy(pca_rec, id = "pca", type = "variance")
+```
+
+Sometimes you don't want to get back all the principal components of the data. We can either specify how many components we want with `num_comp` (or `rank.` in `prcomp()`)
+
+```{r}
+recipe(~., data = USArrests) %>%
+  step_normalize(all_numeric()) %>%
+  step_pca(all_numeric(), num_comp = 3) %>%
+  prep() %>%
+  bake(new_data = NULL)
+```
+
+or using a `threshold` to specify how many components to keep by the variance explained. So by setting `threshold = 0.7`, `step_pca()` will generate enough principal components to explain 70% of the variance.
+
+```{r}
+recipe(~., data = USArrests) %>%
+  step_normalize(all_numeric()) %>%
+  step_pca(all_numeric(), threshold = 0.7) %>%
+  prep() %>%
+  bake(new_data = NULL)
+```
+
+## Matrix Completion
+
+This section is WIP.
+
+## Kmeans Clustering
+
+We will be using the tidyclust package to perform these clustering tasks. It was a similar interface to parsnip, and it interfaces well with the rest of tidymodels.
+
+Before we get going let us create a synthetic data set that we know has groups.
+
+```{r}
+set.seed(2)
+
+x_df <- tibble(
+  V1 = rnorm(n = 50, mean = rep(c(0, 3), each = 25)),
+  V2 = rnorm(n = 50, mean = rep(c(0, -4), each = 25))
+)
+```
+
+And we can plot it with ggplot2 to see that the groups are really there. Note that we didn't include this grouping information in `x_df` as we are trying to emulate a situation where we don't know of the possible underlying clusters.
+
+```{r}
+#| fig-alt: |
+#|  Scatter chart of x_df data set with V1 on the x-axis and V2
+#|  on the y-axis. Colors correspending to the two groups in the
+#|  data. The data neatly seperates into gaussian clusters.
+x_df %>%
+  ggplot(aes(V1, V2, color = rep(c("A", "B"), each = 25))) +
+  geom_point() +
+  labs(color = "groups")
+```
+
+Now that we have the data, it is time to create a cluster specification. Since we want to perform K-means clustering, we will use the `k_means()` function from tidyclust. We use the `num_clusters` argument to specify how many centroids the K-means algorithm need to use. We also set a mode and engine, which this time are set to the same as the defaults. We also set `nstart = 20`, this allows the algorithm to have multiple initial starting positions, which we use in the hope of finding global maxima instead of local maxima.
+
+```{r}
+kmeans_spec <- k_means(num_clusters = 3) %>%
+  set_mode("partition") %>%
+  set_engine("stats") %>%
+  set_args(nstart = 20)
+
+kmeans_spec
+```
+
+Once we have this specification we can fit it to our data. We remember to set a seed because the K-means algorithm starts with random initialization
+
+```{r}
+set.seed(1234)
+kmeans_fit <- kmeans_spec %>%
+  fit(~., data = x_df)
+```
+
+This fitted model has a lot of different kinds of information.
+
+```{r}
+kmeans_fit
+```
+
+An otherall function to inspect your fitted tidyclust models is `extract_fit_summary()` which returns all different kind of information
+
+```{r}
+extract_fit_summary(kmeans_fit)
+```
+
+We can also extract some of these quantities directly using `extract_centroids()`
+
+```{r}
+extract_centroids(kmeans_fit)
+```
+
+and `extract_cluster_assignment()`
+
+```{r}
+extract_cluster_assignment(kmeans_fit)
+```
+
+prediction in a clustering model isn't well defined. But we can think of it as "what cluster would these observations be in if they were part of the data set". For the k-means case, it looks at which centroid these observations are closest to.
+
+```{r}
+predict(kmeans_fit, new_data = x_df)
+```
+
+
+Lastly, we can see what cluster each observation belongs to by using `augment()`, which does the same thing as `predict()` but add it to the orginial data set. This makes it handy for EDA and plotting the results.
+
+```{r}
+augment(kmeans_fit, new_data = x_df)
+```
+
+We can visualize the result of `augment()` to see how well the clustering performed.
+
+```{r}
+#| fig-alt: |
+#|  Scatter chart of augmented data set with V1 on the x-axis and V2
+#|  on the y-axis. Colors correspending to the .pred_cluster variables.
+#|  Left-most cluster is one color, right-most cluster is another
+#|  color and the points between them in each real cluster is
+#|  contained in a third color.
+augment(kmeans_fit, new_data = x_df) %>%
+  ggplot(aes(V1, V2, color = .pred_cluster)) +
+  geom_point()
+```
+
+This is all well and good, but it would be nice if we could try out a number of different clusters and then find the best one. For this we will use `tune_cluster()`. `tune_cluster()` works pretty much like `tune_grid()` expect that it works with cluster models.
+
+```{r}
+kmeans_spec_tuned <- kmeans_spec %>% 
+  set_args(num_clusters = tune())
+
+kmeans_wf <- workflow() %>%
+  add_model(kmeans_spec_tuned) %>%
+  add_formula(~.)
+```
+
+now we can use this workflow with `tune_cluster()` to fit it many times for different values of `num_clusters`.
+
+```{r}
+set.seed(1234)
+x_boots <- bootstraps(x_df, times = 10)
+
+num_clusters_grid <- tibble(num_clusters = seq(1, 10))
+
+tune_res <- tune_cluster(
+  object = kmeans_wf,
+  resamples = x_boots,
+  grid = num_clusters_grid
+)
+```
+
+And we can use `collect_metrics()` as before
+
+```{r}
+tune_res %>%
+  collect_metrics()
+```
+
+Now that we have the total within-cluster sum-of-squares we can plot them against `k` so we can use the [elbow method](https://en.wikipedia.org/wiki/Elbow_method_(clustering)) to find the optimal number of clusters. This actually pops right out if we use `autoplot()` on the results.
+
+```{r}
+tune_res %>%
+  autoplot()
+```
+
+We see an elbow when the number of clusters is equal to 2 which makes us happy since the data set is specifically created to have 2 clusters. We can now construct the final kmeans model
+
+```{r}
+final_kmeans <- kmeans_wf %>%
+  update_model(kmeans_spec %>% set_args(num_clusters = 2)) %>%
+  fit(x_df)
+```
+
+And we can finish by visualizing the clusters it found.
+
+```{r}
+#| fig-alt: |
+#|  Scatter chart of augmented data set with V1 on the x-axis and V2
+#|  on the y-axis. Colors correspending to the two cluster in the
+#|  data. These results align closely with the true clusters.
+augment(final_kmeans, new_data = x_df) %>%
+  ggplot(aes(V1, V2, color = .pred_cluster)) +
+  geom_point()
+```
+
+## Hierarchical Clustering
+
+The `hclust()` function is one way to perform hierarchical clustering in R. It only needs one input and that is a dissimilarity structure as produced by `dist()`. Furthermore, we can specify a couple of things,
+
+We will use the `hier_clust()` function from tidyclust to perform hierarchical clustering. We will keep all the defaults except for the agglomeration method. Let us cluster this data in a couple of different ways to see how the choice of agglomeration method changes the clustering. 
+
+```{r}
+res_hclust_complete <- hier_clust(linkage_method = "complete") %>%
+  fit(~., data = x_df)
+
+res_hclust_average <- hier_clust(linkage_method = "average") %>%
+  fit(~., data = x_df)
+
+res_hclust_single <- hier_clust(linkage_method = "single") %>%
+  fit(~., data = x_df)
+```
+
+The [factoextra](https://rpkgs.datanovia.com/factoextra/index.html) package provides functions (`fviz_dend()`) to visualize the clustering created using `hclust()`. We use `fviz_dend()` to show the dendrogram. We need to use the `extract_fit_engine()` to extract the underlying model object that `fviz_dend()` expects.
+
+```{r}
+#| warning: false
+#| fig-alt: |
+#|  Dendrogram visualization. Both left and right side looks more
+#|  or less even.
+res_hclust_complete %>%
+  extract_fit_engine() %>%
+  fviz_dend(main = "complete", k = 2)
+```
+
+```{r}
+#| warning: false
+#| fig-alt: |
+#|  Dendrogram visualization. Both left and right side looks more
+#|  or less even.
+res_hclust_average %>%
+  extract_fit_engine() %>%
+  fviz_dend(main = "average", k = 2)
+```
+
+```{r}
+#| warning: false
+#| fig-alt: |
+#|  Dendrogram visualization. Left side has 1 leaf and the right
+#|  side contain the remaining leaves.
+res_hclust_single %>%
+  extract_fit_engine() %>%
+  fviz_dend(main = "single", k = 2)
+```
+
+If we don't know the importance of the different predictors in data set it could be beneficial to scale the data such that each variable has the same influence. We will use a recipe and workflow to do this.
+
+```{r}
+#| warning: false
+#| fig-alt: |
+#|  Dendrogram visualization. Both left and right side looks more
+#|  or less even.
+hier_rec <- recipe(~., data = x_df) %>%
+  step_normalize(all_numeric_predictors())
+
+hier_wf <- workflow() %>%
+  add_recipe(hier_rec) %>%
+  add_model(hier_clust(linkage_method = "complete"))
+
+hier_fit <- hier_wf %>%
+  fit(data = x_df) 
+
+hier_fit %>%
+  extract_fit_engine() %>%
+  fviz_dend(k = 2)
+```
+
+## PCA on the NCI60 Data
+
+We will now explore the `NCI60` data set. It is genomic data set, containing cancer cell line microarray data, which consists of 6830 gene expression measurements on 64 cancer cell lines. The data comes as a list containing a matrix and its labels. We do a little work to turn the data into a tibble we will use for the rest of the chapter.
+
+```{r}
+data(NCI60, package = "ISLR")
+nci60 <- NCI60$data %>%
+  as_tibble(.name_repair = ~ paste0("V_", .x)) %>%
+  mutate(label = factor(NCI60$labs)) %>%
+  relocate(label)
+```
+
+We do not expect to use the `label` variable doing the analysis since we are emulating an unsupervised analysis. Since we are an exploratory task we will be fine with using `prcomp()` since we don't need to apply these transformations to anything else. We remove `label` and remember to set `scale = TRUE` to perform scaling of all the variables.
+
+```{r}
+nci60_pca <- nci60 %>%
+  select(-label) %>%
+  prcomp(scale = TRUE)
+```
+
+For visualization purposes, we will now join up the labels into the result of `augment(nci60_pca)` so we can visualize how close similar labeled points are to each other.
+
+```{r}
+nci60_pcs <- bind_cols(
+  augment(nci60_pca),
+  nci60 %>% select(label)
+)
+```
+
+We have 14 different labels, so we will make use of the `"Polychrome 36"` palette to help us better differentiate between the labels.
+
+```{r}
+colors <- unname(palette.colors(n = 14, palette = "Polychrome 36"))
+```
+
+Or we can plot the different PCs against each other. It is a good idea to compare the first PCs against each other since they carry the most information. We will just compare the pairs 1-2 and 1-3 but you can do more yourself. It tends to be a good idea to stop once interesting things appear in the plots.
+
+```{r}
+#| fig-alt: |
+#|  Scatter plot of nci60_pcs across the first 2 principal
+#|  components. Colors by label which has 14 unique values.
+#|  Observations with same label appears fairly close together
+#|  for most labels.
+nci60_pcs %>%
+  ggplot(aes(.fittedPC1, .fittedPC2, color = label)) +
+  geom_point() +
+  scale_color_manual(values = colors)
+```
+
+We see there is some local clustering of the different cancer types which is promising, it is not perfect but let us see what happens when we compare PC1 against PC3 now. 
+
+```{r}
+#| fig-alt: |
+#|  Scatter plot of nci60_pcs across the first and third principal
+#|  components. Colors by label which has 14 unique values.
+#|  Observations with same label appears fairly close together
+#|  for most labels.
+nci60_pcs %>%
+  ggplot(aes(.fittedPC1, .fittedPC3, color = label)) +
+  geom_point() +
+  scale_color_manual(values = colors)
+```
+
+Lastly, we will plot the variance explained of each principal component. We can use `tidy()` with `matrix = "eigenvalues"` to accomplish this easily, so we start with the percentage of each PC
+
+```{r}
+#| fig-alt: |
+#|  Connected line chart of percent variance explained for each
+#|  principal components, with percent variance explained on the
+#|  y-axis and PCs on the x-axis. 11% for PC1, 7% for PC2, 6% for 
+#|  PC3, 4% for PC4 and the remaining 60 PCs more or less linearly
+#|  goes towards 0%.
+tidy(nci60_pca, matrix = "eigenvalues") %>%
+  ggplot(aes(PC, percent)) +
+  geom_point() +
+  geom_line() +
+  scale_x_continuous(breaks = seq(0, 60, by = 5)) +
+  scale_y_continuous(labels = scales::percent)
+```
+
+with the first PC having a little more than 10% and a fairly fast drop. 
+
+And we can get the cumulative variance explained just the same.
+
+```{r}
+#| fig-alt: |
+#|  Connected line chart of cumulative percent variance explained
+#|  for each principal components, with percent variance explained
+#|  on the y-axis and PCs on the x-axis.
+tidy(nci60_pca, matrix = "eigenvalues") %>%
+  ggplot(aes(PC, cumulative)) +
+  geom_point() +
+  geom_line()
+```
+
+## Clustering on nci60 dataset
+
+Let us now see what happens if we perform clustering on the `nci60` data set. Before we start it would be good if we create a scaled version of this data set. We can use the recipes package to perform those transformations. And a workflow to be able to combine it with the cluster model later
+
+```{r}
+nci60_rec <- recipe(~ ., data = nci60) %>%
+  step_rm(label) %>%
+  step_normalize(all_predictors())
+
+nci60_wf <- workflow() %>%
+  add_recipe(nci60_rec)
+```
+
+Now we start by fitting multiple hierarchical clustering models using different agglomeration methods.
+
+```{r}
+nci60_complete <- nci60_wf %>%
+  add_model(hier_clust(linkage_method = "complete")) %>%
+  fit(data = nci60)
+
+nci60_average <- nci60_wf %>%
+  add_model(hier_clust(linkage_method = "average")) %>%
+  fit(data = nci60)
+
+nci60_single <- nci60_wf %>%
+  add_model(hier_clust(linkage_method = "single")) %>%
+  fit(data = nci60)
+```
+
+We then visualize them to see if any of them have some good natural separations.
+
+```{r}
+#| warning: false
+#| fig-alt: |
+#|  Dendrogram visualization. Not colored, has most of the splits
+#|  happen at larger hights.
+nci60_complete %>%
+  extract_fit_engine() %>%
+  fviz_dend(main = "Complete")
+```
+
+```{r}
+#| warning: false
+#| fig-alt: |
+#|  Dendrogram visualization. Not colored, has most of the splits
+#|  happen at larger hights.
+nci60_average %>% 
+  extract_fit_engine() %>%
+  fviz_dend(main = "Average")
+```
+
+```{r}
+#| warning: false
+#| fig-alt: |
+#|  Dendrogram visualization. Not colored, has most of the splits
+#|  happen at larger hight, very close together, with a few splits
+#|  a lower heights.
+nci60_single %>%
+  extract_fit_engine() %>%
+  fviz_dend(main = "Single")
+```
+
+We now color according to `k = 4` and we get the following separations.
+
+```{r}
+#| warning: false
+#| fig-alt: |
+#|  Dendrogram visualization. Colors for 4 clusters.
+nci60_complete %>%
+  extract_fit_engine() %>%
+  fviz_dend(k = 4, main = "hclust(complete) on nci60")
+```
+
+We now take find the clustering and calculate which label is the most common one within each cluster.
+
+```{r}
+predict(nci60_complete, new_data = nci60, num_clusters = 4) %>%
+  mutate(label = nci60$label) %>%
+  count(label, .pred_cluster) %>%
+  group_by(.pred_cluster) %>%
+  mutate(prop = n / sum(n)) %>%
+  slice_max(n = 1, order_by = prop) %>%
+  ungroup()
+```
+
+We can also see what happens if we try to fit a K-means clustering. We liked 4 clusters from earlier so let's stick with that.
+
+```{r}
+set.seed(2)
+nci60_kmeans <- nci60_wf %>%
+  add_model(k_means(num_clusters = 4)) %>%
+  fit(data = nci60)
+```
+
+and we can now extract the centroids
+
+```{r}
+nci60_kmeans %>%
+  extract_centroids()
+```
+
+and the cluster assignments
+
+```{r}
+nci60_kmeans %>%
+  extract_cluster_assignment(nci60_kmeans)
+```
+
+Lastly, let us see how the two different methods we used compare against each other. Let us save the cluster ids in `cluster_kmeans` and `cluster_hclust` and then use `conf_mat()` in a different way to quickly generate a heatmap between the two methods.
+
+```{r}
+#| fig-alt: |
+#|  Confusion matrix, truth along x-axis and prediction along
+#|  y-axis. No agreement between labels.
+cluster_kmeans <- predict(nci60_kmeans, nci60)
+cluster_hclust <- predict(nci60_complete, nci60, num_clusters = 4)
+
+tibble(
+  kmeans = cluster_kmeans$.pred_cluster,
+  hclust = cluster_hclust$.pred_cluster
+) %>%
+  conf_mat(kmeans, hclust) %>%
+  autoplot(type = "heatmap")
+```
+
+There is not a lot of agreement between labels which makes sense, since the labels themselves are arbitrarily added. What is important is that they tend to agree quite a lot (the confusion matrix is sparse).
+
+One last thing is that it is sometimes useful to perform dimensionality reduction before using the clustering method. Let us use the recipes package to calculate the PCA of `nci60` and keep the 5 first components 
+
+```{r}
+nci60_pca_rec <- recipe(~ ., data = nci60) %>%
+  step_rm(label) %>%
+  step_normalize(all_predictors()) %>%
+  step_pca(all_predictors(), num_comp = 5)
+
+nci60_pca_wf <- workflow() %>%
+  add_recipe(nci60_pca_rec)
+```
+
+and now fit this new workflow
+
+```{r}
+nci60_pca <- nci60_pca_wf %>%
+  add_model(hier_clust(linkage_method = "complete")) %>%
+  fit(data = nci60)
+```
+
+we can now visualize on this reduced data set, and sometimes we get quite good results since the clustering method doesn't have to work in high dimensions.
+
+```{r}
+#| warning: false
+#| fig-alt: |
+#|  Dendrogram visualization. Colors to produce 4 clusters.
+nci60_pca %>%
+  extract_fit_engine() %>%
+  fviz_dend(k = 4, main = "hclust on first five PCs")
+```
